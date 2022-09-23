@@ -1,4 +1,4 @@
-package swift
+package main
 
 import (
 	"crypto/md5"

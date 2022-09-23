@@ -1,8 +1,6 @@
 package main
 
 import (
-	"github.com/Lirt/velero-plugin-swift/src/cinder"
-	"github.com/Lirt/velero-plugin-swift/src/swift"
 	"github.com/sirupsen/logrus"
 	veleroplugin "github.com/vmware-tanzu/velero/pkg/plugin/framework"
 )
@@ -15,9 +13,9 @@ func main() {
 }
 
 func newSwiftObjectStore(logger logrus.FieldLogger) (interface{}, error) {
-	return swift.NewObjectStore(logger), nil
+	return NewObjectStore(logger), nil
 }
 
 func newCinderBlockStore(logger logrus.FieldLogger) (interface{}, error) {
-	return cinder.NewBlockStore(logger), nil
+	return NewBlockStore(logger), nil
 }

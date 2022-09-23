@@ -1,4 +1,4 @@
-package swift
+package main
 
 import (
 	"fmt"
@@ -7,7 +7,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/Lirt/velero-plugin-swift/src/utils"
 	"github.com/gophercloud/gophercloud"
 	"github.com/gophercloud/gophercloud/openstack"
 	"github.com/gophercloud/gophercloud/openstack/objectstorage/v1/objects"
@@ -30,7 +29,7 @@ func NewObjectStore(log logrus.FieldLogger) *ObjectStore {
 func (o *ObjectStore) Init(config map[string]string) error {
 	o.log.Infof("ObjectStore.Init called")
 
-	err := utils.Authenticate(&o.provider, "swift", o.log)
+	err := Authenticate(&o.provider, "swift", o.log)
 	if err != nil {
 		return fmt.Errorf("failed to authenticate against Openstack: %v", err)
 	}
@@ -38,7 +37,7 @@ func (o *ObjectStore) Init(config map[string]string) error {
 	if o.client == nil {
 		region, ok := os.LookupEnv("OS_SWIFT_REGION_NAME")
 		if !ok {
-			region = utils.GetEnv("OS_REGION_NAME", "")
+			region = GetEnv("OS_REGION_NAME", "")
 		}
 		o.client, err = openstack.NewObjectStorageV1(o.provider, gophercloud.EndpointOpts{
 			Region: region,

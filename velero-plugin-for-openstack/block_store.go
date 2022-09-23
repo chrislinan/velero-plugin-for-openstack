@@ -1,11 +1,10 @@
-package cinder
+package main
 
 import (
 	"fmt"
 	"math/rand"
 	"strconv"
 
-	"github.com/Lirt/velero-plugin-swift/src/utils"
 	"github.com/gophercloud/gophercloud"
 	"github.com/gophercloud/gophercloud/openstack"
 	"github.com/gophercloud/gophercloud/openstack/blockstorage/v3/snapshots"
@@ -41,13 +40,13 @@ func (b *BlockStore) Init(config map[string]string) error {
 	b.config = config
 
 	// Authenticate to Openstack
-	err := utils.Authenticate(&b.provider, "cinder", b.log)
+	err := Authenticate(&b.provider, "cinder", b.log)
 	if err != nil {
 		return fmt.Errorf("failed to authenticate against openstack: %v", err)
 	}
 
 	if b.client == nil {
-		region := utils.GetEnv("OS_REGION_NAME", "")
+		region := GetEnv("OS_REGION_NAME", "")
 		b.client, err = openstack.NewBlockStorageV3(b.provider, gophercloud.EndpointOpts{
 			Region: region,
 		})
