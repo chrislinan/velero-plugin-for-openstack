@@ -59,19 +59,19 @@ func (o *ObjectStore) Init(config map[string]string) error {
 	}
 
 	// see https://specs.openstack.org/openstack/swift-specs/specs/in_progress/service_token.html
-	resellerPrefixes := strings.Split(utils.GetEnv("OS_SWIFT_RESELLER_PREFIXES", "AUTH_"), ",")
-	account := utils.GetEnv("OS_SWIFT_ACCOUNT_OVERRIDE", "")
+	resellerPrefixes := strings.Split(GetEnv("OS_SWIFT_RESELLER_PREFIXES", "AUTH_"), ",")
+	account := GetEnv("OS_SWIFT_ACCOUNT_OVERRIDE", "")
 	if account != "" {
 		u, err := url.Parse(o.client.Endpoint)
 		if err != nil {
 			return fmt.Errorf("failed to parse swift storage client endpoint: %v", err)
 		}
-		u.Path = utils.ReplaceAccount(account, u.Path, resellerPrefixes)
+		u.Path = ReplaceAccount(account, u.Path, resellerPrefixes)
 		o.client.Endpoint = u.String()
 		o.log.Infof("Successfully overrode service client endpoint with a %v account: %v", account, o.client.Endpoint)
 	}
 
-	endpoint := utils.GetEnv("OS_SWIFT_ENDPOINT_OVERRIDE", "")
+	endpoint := GetEnv("OS_SWIFT_ENDPOINT_OVERRIDE", "")
 	if endpoint != "" {
 		u, err := url.Parse(endpoint)
 		if err != nil {
