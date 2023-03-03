@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"math/rand"
+	"os"
 	"strconv"
 
 	"github.com/gophercloud/gophercloud"
@@ -40,19 +41,28 @@ func (b *BlockStore) Init(config map[string]string) error {
 	b.config = config
 
 	// Authenticate to Openstack
-	err := Authenticate(&b.provider, "cinder", b.log)
+	err := Authenticate(&b.provider, "cinder", config, b.log)
 	if err != nil {
 		return fmt.Errorf("failed to authenticate against openstack: %v", err)
 	}
 
-	if b.client == nil {
-		region := GetEnv("OS_REGION_NAME", "")
+	// If we haven't set client before or we use multiple clouds - get new client
+	if b.client == nil || config["cloud"] != "" {
+		region, ok := os.LookupEnv("OS_REGION_NAME")
+		if !ok {
+			if config["region"] != "" {
+				region = config["region"]
+			} else {
+				region = "RegionOne"
+			}
+		}
 		b.client, err = openstack.NewBlockStorageV3(b.provider, gophercloud.EndpointOpts{
 			Region: region,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create cinder storage client: %v", err)
 		}
+		b.log.Infof("Successfully created service client with endpoint %v using region %v", b.client.Endpoint, region)
 	}
 
 	return nil

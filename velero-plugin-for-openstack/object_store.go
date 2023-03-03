@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gophercloud/gophercloud"
@@ -29,15 +31,23 @@ func NewObjectStore(log logrus.FieldLogger) *ObjectStore {
 func (o *ObjectStore) Init(config map[string]string) error {
 	o.log.Infof("ObjectStore.Init called")
 
-	err := Authenticate(&o.provider, "swift", o.log)
+	err := Authenticate(&o.provider, "swift", config, o.log)
 	if err != nil {
 		return fmt.Errorf("failed to authenticate against Openstack: %v", err)
 	}
 
-	if o.client == nil {
+	// If we haven't set client before or we use multiple clouds - get new client
+	if o.client == nil || config["cloud"] != "" {
 		region, ok := os.LookupEnv("OS_SWIFT_REGION_NAME")
 		if !ok {
-			region = GetEnv("OS_REGION_NAME", "")
+			region, ok = os.LookupEnv("OS_REGION_NAME")
+			if !ok {
+				if config["region"] != "" {
+					region = config["region"]
+				} else {
+					region = "RegionOne"
+				}
+			}
 		}
 		o.client, err = openstack.NewObjectStorageV1(o.provider, gophercloud.EndpointOpts{
 			Region: region,
@@ -45,32 +55,57 @@ func (o *ObjectStore) Init(config map[string]string) error {
 		if err != nil {
 			return fmt.Errorf("failed to create swift storage object: %v", err)
 		}
+		o.log.Infof("Successfully created service client with endpoint %v using region %v", o.client.Endpoint, region)
+	}
+
+	// see https://specs.openstack.org/openstack/swift-specs/specs/in_progress/service_token.html
+	resellerPrefixes := strings.Split(utils.GetEnv("OS_SWIFT_RESELLER_PREFIXES", "AUTH_"), ",")
+	account := utils.GetEnv("OS_SWIFT_ACCOUNT_OVERRIDE", "")
+	if account != "" {
+		u, err := url.Parse(o.client.Endpoint)
+		if err != nil {
+			return fmt.Errorf("failed to parse swift storage client endpoint: %v", err)
+		}
+		u.Path = utils.ReplaceAccount(account, u.Path, resellerPrefixes)
+		o.client.Endpoint = u.String()
+		o.log.Infof("Successfully overrode service client endpoint with a %v account: %v", account, o.client.Endpoint)
+	}
+
+	endpoint := utils.GetEnv("OS_SWIFT_ENDPOINT_OVERRIDE", "")
+	if endpoint != "" {
+		u, err := url.Parse(endpoint)
+		if err != nil {
+			return fmt.Errorf("failed to parse swift storage client endpoint: %v", err)
+		}
+		o.client.Endpoint = u.String()
+		o.client.ResourceBase = ""
+		o.log.Infof("Successfully overrode service client endpoint: %v", o.client.Endpoint)
 	}
 
 	return nil
 }
 
-// GetObject returns body of Swift object defined by bucket name and key
-func (o *ObjectStore) GetObject(bucket, key string) (io.ReadCloser, error) {
+// GetObject returns body of Swift object defined by container name and object
+func (o *ObjectStore) GetObject(container, object string) (io.ReadCloser, error) {
 	log := o.log.WithFields(logrus.Fields{
-		"bucket": bucket,
-		"key":    key,
+		"container": container,
+		"object":    object,
 	})
 	log.Infof("GetObject")
 
-	object := objects.Download(o.client, bucket, key, nil)
-	if object.Err != nil {
-		return nil, fmt.Errorf("failed to download contents of key %v from bucket %v: %v", key, bucket, object.Err)
+	res := objects.Download(o.client, container, object, nil)
+	if res.Err != nil {
+		return nil, fmt.Errorf("failed to download contents of %q object from %q container: %v", object, container, res.Err)
 	}
 
-	return object.Body, nil
+	return res.Body, nil
 }
 
-// PutObject uploads new object into bucket
-func (o *ObjectStore) PutObject(bucket string, key string, body io.Reader) error {
+// PutObject uploads new object into container
+func (o *ObjectStore) PutObject(container string, object string, body io.Reader) error {
 	log := o.log.WithFields(logrus.Fields{
-		"bucket": bucket,
-		"key":    key,
+		"container": container,
+		"object":    object,
 	})
 	log.Infof("PutObject")
 
@@ -78,40 +113,40 @@ func (o *ObjectStore) PutObject(bucket string, key string, body io.Reader) error
 		Content: body,
 	}
 
-	if _, err := objects.Create(o.client, bucket, key, createOpts).Extract(); err != nil {
-		return fmt.Errorf("failed to create new object in bucket %v with key %v: %v", bucket, key, err)
+	if _, err := objects.Create(o.client, container, object, createOpts).Extract(); err != nil {
+		return fmt.Errorf("failed to create new %q object in %q container: %v", object, container, err)
 	}
 
 	return nil
 }
 
 // ObjectExists does Get operation and validates result or error to find out if object exists
-func (o *ObjectStore) ObjectExists(bucket, key string) (bool, error) {
+func (o *ObjectStore) ObjectExists(container, object string) (bool, error) {
 	log := o.log.WithFields(logrus.Fields{
-		"bucket": bucket,
-		"key":    key,
+		"container": container,
+		"object":    object,
 	})
 	log.Infof("ObjectExists")
 
-	result := objects.Get(o.client, bucket, key, nil)
+	res := objects.Get(o.client, container, object, nil)
 
-	if result.Err != nil {
-		if result.Err.Error() == "Resource not found" {
-			log.Infof("Key %v in bucket %v doesn't exist yet.", key, bucket)
+	if res.Err != nil {
+		if _, ok := res.Err.(gophercloud.ErrDefault404); ok {
+			log.Infof("%q object doesn't yet exist in %q container.", object, container)
 			return false, nil
 		}
-		return false, fmt.Errorf("cannot Get key %v in bucket %v: %v", key, bucket, result.Err)
+		return false, fmt.Errorf("cannot Get %q object from %q container: %v", object, container, res.Err)
 	}
 
 	return true, nil
 }
 
-// ListCommonPrefixes returns list of objects in bucket, that match specified prefix
-func (o *ObjectStore) ListCommonPrefixes(bucket, prefix, delimiter string) ([]string, error) {
+// ListCommonPrefixes returns list of objects in container, that match specified prefix
+func (o *ObjectStore) ListCommonPrefixes(container, prefix, delimiter string) ([]string, error) {
 	log := o.log.WithFields(logrus.Fields{
-		"bucket":    bucket,
-		"delimiter": delimiter,
+		"container": container,
 		"prefix":    prefix,
+		"delimiter": delimiter,
 	})
 	log.Infof("ListCommonPrefixes")
 
@@ -121,14 +156,14 @@ func (o *ObjectStore) ListCommonPrefixes(bucket, prefix, delimiter string) ([]st
 		Full:      true,
 	}
 
-	allPages, err := objects.List(o.client, bucket, opts).AllPages()
+	allPages, err := objects.List(o.client, container, opts).AllPages()
 	if err != nil {
-		return nil, fmt.Errorf("failed to list objects in bucket %v: %v", bucket, err)
+		return nil, fmt.Errorf("failed to list objects in %q container: %v", container, err)
 	}
 
 	allObjects, err := objects.ExtractInfo(allPages)
 	if err != nil {
-		return nil, fmt.Errorf("failed to extract info from objects in bucket %v: %v", bucket, err)
+		return nil, fmt.Errorf("failed to extract objects info from %q container: %v", container, err)
 	}
 
 	var objNames []string
@@ -140,51 +175,51 @@ func (o *ObjectStore) ListCommonPrefixes(bucket, prefix, delimiter string) ([]st
 }
 
 // ListObjects lists objects with prefix in all containers
-func (o *ObjectStore) ListObjects(bucket, prefix string) ([]string, error) {
+func (o *ObjectStore) ListObjects(container, prefix string) ([]string, error) {
 	log := o.log.WithFields(logrus.Fields{
-		"bucket": bucket,
-		"prefix": prefix,
+		"container": container,
+		"prefix":    prefix,
 	})
 	log.Infof("ListObjects")
 
-	objects, err := o.ListCommonPrefixes(bucket, prefix, "/")
+	objects, err := o.ListCommonPrefixes(container, prefix, "/")
 	if err != nil {
-		return nil, fmt.Errorf("failed to list objects in bucket %v with prefix %v: %v", bucket, prefix, err)
+		return nil, fmt.Errorf("failed to list objects in %q container with %q prefix: %v", container, prefix, err)
 	}
 
 	return objects, nil
 }
 
-// DeleteObject deletes object specified by key from bucket
-func (o *ObjectStore) DeleteObject(bucket, key string) error {
+// DeleteObject deletes object specified by object from container
+func (o *ObjectStore) DeleteObject(container, object string) error {
 	log := o.log.WithFields(logrus.Fields{
-		"bucket": bucket,
-		"key":    key,
+		"container": container,
+		"object":    object,
 	})
 	log.Infof("DeleteObject")
 
-	_, err := objects.Delete(o.client, bucket, key, nil).Extract()
+	_, err := objects.Delete(o.client, container, object, nil).Extract()
 	if err != nil {
-		return fmt.Errorf("failed to delete object with key %v from bucket %v: %v", key, bucket, err)
+		return fmt.Errorf("failed to delete %q object from %q container: %v", object, container, err)
 	}
 
 	return nil
 }
 
-// CreateSignedURL creates temporary URL for key in bucket
-func (o *ObjectStore) CreateSignedURL(bucket, key string, ttl time.Duration) (string, error) {
+// CreateSignedURL creates temporary URL for object in container
+func (o *ObjectStore) CreateSignedURL(container, object string, ttl time.Duration) (string, error) {
 	log := o.log.WithFields(logrus.Fields{
-		"bucket": bucket,
-		"key":    key,
+		"container": container,
+		"object":    object,
 	})
 	log.Infof("CreateSignedURL")
 
-	url, err := objects.CreateTempURL(o.client, bucket, key, objects.CreateTempURLOpts{
+	url, err := objects.CreateTempURL(o.client, container, object, objects.CreateTempURLOpts{
 		Method: http.MethodGet,
 		TTL:    int(ttl.Seconds()),
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to create temporary URL for bucket %v with key %v: %v", bucket, key, err)
+		return "", fmt.Errorf("failed to create temporary URL for %q object in %q container: %v", object, container, err)
 	}
 
 	return url, nil

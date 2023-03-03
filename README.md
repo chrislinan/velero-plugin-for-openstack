@@ -22,11 +22,13 @@ This plugin is [included as community supported plugin by Velero organization](h
 
 ## Compatibility
 
-Below is a listing of plugin versions and respective Velero versions for which the compatibility is tested and guaranteed.
+Below is a matrix of plugin versions and Velero versions for which the compatibility is tested and guaranteed.
 
 | Plugin Version | Velero Version |
 | :------------- | :------------- |
-| v0.3.x         | v1.4.x, v1.5.x, v1.6.x |
+| v0.5.x         | v1.4.x, v1.5.x, v1.6.x, v1.7.x, v1.8.x, 1.9.x, 1.10.x |
+| v0.4.x         | v1.4.x, v1.5.x, v1.6.x, v1.7.x, v1.8.x, 1.9.x |
+| v0.3.x         | v1.4.x, v1.5.x, v1.6.x, v1.7.x, v1.8.x, 1.9.x |
 | v0.2.x         | v1.4.x, v1.5.x |
 | v0.1.x         | v1.4.x, v1.5.x |
 
@@ -42,7 +44,7 @@ The order of authentication methods is following:
 
 For authentication using application credentials you need to first create them using openstack CLI command such as `openstack application credential create <NAME>`.
 
-### Authentication using environment variables
+### Authentication using Environment Variables
 
 Configure velero container with your Openstack authentication environment variables:
 
@@ -71,6 +73,15 @@ export OS_APPLICATION_CREDENTIAL_SECRET=<APP_CRED_SECRET>
 # If you want to test with unsecure certificates
 export OS_VERIFY="false"
 export TLS_SKIP_VERIFY="true"
+
+# If you want to override Swift account ID
+export OS_SWIFT_ACCOUNT_OVERRIDE=<NEW_PROJECT_ID>
+# In case if you have non-standard reseller prefixes
+export OS_SWIFT_RESELLER_PREFIXES=AUTH_,SERVICE_
+
+# If you want to completely override Swift endpoint URL
+# Has a higher priority over the OS_SWIFT_ACCOUNT_OVERRIDE
+export OS_SWIFT_ENDPOINT_OVERRIDE=http://my-local/v1/swift
 ```
 
 If your Openstack cloud has separated Swift service (SwiftStack or different), you can specify special environment variables for Swift to authenticate it and keep the standard ones for Cinder:
@@ -85,15 +96,26 @@ export OS_SWIFT_TENANT_NAME=<TENANT_NAME>
 export OS_SWIFT_USERNAME=<USERNAME>
 ```
 
+This option does not support using multiple clouds (or BSLs) for backups.
+
 ### Authentication using file
 
-You can authenticate with this plugin also using file in [`clouds.y(a)ml` format](https://docs.openstack.org/python-openstackclient/pike/configuration/index.html#clouds-yaml).
+You can also authenticate using file in [`clouds.y(a)ml` format](https://docs.openstack.org/python-openstackclient/pike/configuration/index.html#clouds-yaml).
 
-Easiest is to create file `/etc/openstack/clouds.y(a)ml` with content like this:
+Easiest way is to create file `/etc/openstack/clouds.y(a)ml` with content like this:
 
 ```yaml
 clouds:
-  <CLOUD_NAME>:
+  <CLOUD_NAME_1>:
+    region_name: <REGION_NAME>
+    auth:
+      auth_url: "<AUTH_URL /v3>"
+      username: <USERNAME>
+      password: <PASSWORD>
+      project_name: <PROJECT_NAME>
+      project_domain_name: <PROJECT_DOMAIN_NAME>
+      user_domain_name: <USER_DOMAIN_NAME>
+  <CLOUD_NAME_2>:
     region_name: <REGION_NAME>
     auth:
       auth_url: "<AUTH_URL /v3>"
@@ -108,13 +130,58 @@ Or when authenticating using [Application Credentials](https://docs.openstack.or
 
 ```yaml
 clouds:
-  <CLOUD_NAME>:
+  <CLOUD_NAME_1>:
     region_name: <REGION_NAME>
     auth:
       auth_url: "<AUTH_URL /v3>"
       application_credential_name: <APPLICATION_CREDENTIAL_NAME>
       application_credential_id: <APPLICATION_CREDENTIAL_ID>
       application_credential_secret: <APPLICATION_CREDENTIAL_SECRET>
+  <CLOUD_NAME_2>:
+    region_name: <REGION_NAME>
+    auth:
+      auth_url: "<AUTH_URL /v3>"
+      application_credential_name: <APPLICATION_CREDENTIAL_NAME>
+      application_credential_id: <APPLICATION_CREDENTIAL_ID>
+      application_credential_secret: <APPLICATION_CREDENTIAL_SECRET>
+```
+
+These 2 options allow you also to authenticate against multiple Openstack Clouds at the same time. The way you can leverage this functionality is scenario where you want to store backups in 2 different locations. This scenario doesn't apply for Volume Snapshots as they always need to be created in the same cloud and region as where your PVCs are created!
+
+Example of BSLs:
+```yaml
+---
+apiVersion: velero.io/v1
+kind: BackupStorageLocation
+metadata:
+  name: my-backup-in-cloud1
+  namespace: velero
+spec:
+  accessMode: ReadWrite
+  config:
+    cloud: cloud1
+    # optional region
+    region: fra1
+  default: false
+  objectStorage:
+    bucket: velero-backup-cloud1
+  provider: community.openstack.org/openstack
+---
+apiVersion: velero.io/v1
+kind: BackupStorageLocation
+metadata:
+  name: my-backup-in-cloud2
+  namespace: velero
+spec:
+  accessMode: ReadWrite
+  config:
+    cloud: cloud2
+    # optional region
+    region: lon
+  default: false
+  objectStorage:
+    bucket: velero-backup-cloud2
+  provider: community.openstack.org/openstack
 ```
 
 ## Installation
@@ -127,30 +194,41 @@ Initialize velero plugin:
 # Initialize velero from scratch:
 velero install \
        --provider "community.openstack.org/openstack" \
-       --plugins lirt/velero-plugin-for-openstack:v0.3.0 \
-       --bucket <BUCKET_NAME> \
+       --plugins lirt/velero-plugin-for-openstack:v0.5.0 \
+       --bucket <SWIFT_CONTAINER_NAME> \
        --no-secret
 
 # Or add plugin to existing velero:
-velero plugin add lirt/velero-plugin-for-openstack:v0.3.0
+velero plugin add lirt/velero-plugin-for-openstack:v0.5.0
 ```
 
-Note: If you want to use plugin built for `arm` or `arm64` architecture, you can use tag such as this `lirt/velero-plugin-for-openstack:v0.3.0-arm64`.
+Note: If you want to use plugin built for `arm` or `arm64` architecture, you can use tag such as this `lirt/velero-plugin-for-openstack:v0.5.0-arm64`.
 
 Change configuration of `backupstoragelocations.velero.io`:
 
 ```yaml
- spec:
-   objectStorage:
-     bucket: <BUCKET_NAME>
-   provider: community.openstack.org/openstack
+spec:
+  objectStorage:
+    bucket: <CONTAINER_NAME>
+  provider: community.openstack.org/openstack
+  # # Optional config
+  # config:
+  #   cloud: cloud1
+  #   region: fra
+  #   # If you want to enable restic you need to set resticRepoPrefix to this value:
+  #   #   resticRepoPrefix: swift:<CONTAINER_NAME>:/<PATH>
+  #   resticRepoPrefix: swift:my-awesome-container:/restic # Example
 ```
 
 Change configuration of `volumesnapshotlocations.velero.io`:
 
 ```yaml
- spec:
-   provider: community.openstack.org/openstack
+spec:
+  provider: community.openstack.org/openstack
+  # optional config
+  # config:
+  #   cloud: cloud1
+  #   region: fra
 ```
 
 ### Install Using Helm Chart
@@ -168,17 +246,26 @@ credentials:
 configuration:
   provider: community.openstack.org/openstack
   backupStorageLocation:
-    bucket: my-swift-bucket
+    bucket: my-swift-container
     # caCert: <CERT_CONTENTS_IN_BASE64>
+  # # Optional config
+  # config:
+  #   cloud: cloud1
+  #   region: fra
+  #   # If you want to enable restic you need to set resticRepoPrefix to this value:
+  #   #   resticRepoPrefix: swift:<CONTAINER_NAME>:/<PATH>
+  #   resticRepoPrefix: swift:my-awesome-container:/restic # Example
 initContainers:
 - name: velero-plugin-openstack
-  image: lirt/velero-plugin-for-openstack:v0.3.0
+  image: lirt/velero-plugin-for-openstack:v0.5.0
   imagePullPolicy: IfNotPresent
   volumeMounts:
     - mountPath: /target
       name: plugins
 snapshotsEnabled: true
 backupsEnabled: true
+# Optionally enable restic
+# deployRestic: true
 ```
 
 Make sure that secret `velero-credentials` exists and has proper format and content.
@@ -194,7 +281,7 @@ helm upgrade \
      --install \
      --namespace velero \
      --values values.yaml \
-     --version 2.15.0
+     --version 2.32.1
 ```
 
 ## Volume Backups
@@ -203,7 +290,17 @@ Please note two things regarding volume backups:
 1. The snapshots are done using flag `--force`. The reason is that volumes in state `in-use` cannot be snapshotted without it (they would need to be detached in advance). In some cases this can make snapshot contents inconsistent.
 2. Snapshots in the cinder backend are not always supposed to be used as durable. In some cases for proper availability, the snapshot need to be backed up to off-site storage. Please consult if your cinder backend creates durable snapshots with your cloud provider.
 
-Volume backups with Velero can also be done using [Restic](https://velero.io/docs/main/restic/).
+### Native VolumeSnapshots
+
+Alternative Kubernetes native solution (GA since 1.20) for volume snapshots (not backups) are [VolumeSnapshots](https://kubernetes.io/docs/concepts/storage/volume-snapshots/) using [snapshot-controller](https://kubernetes-csi.github.io/docs/snapshot-controller.html).
+
+### Restic
+
+Volume backups with Velero can also be done using [Restic](https://velero.io/docs/main/restic/). Please understand that this repository does not provide any functionality for restic and restic implementation is done purely in Velero code.
+
+There is a common similarity that `restic` can use Openstack Swift as object storage for backups. Restic way of authentication and implementation is however very different from this repository and it means that some ways of authentication that work here will not work with restic. Please refer to [official restic documentation](https://restic.readthedocs.io/en/latest/030_preparing_a_new_repo.html#openstack-swift) to understand how are you supposed to configure authentication variables with restic.
+
+Recommended way of using this plugin with restic is to use authentication with environment variables and only for 1 cloud and 1 BackupStorageLocation. In the BSL you need to configure `config.resticRepoPrefix: swift:<CONTAINER_NAME>:/<PATH>` - for example `config.resticRepoPrefix: swift:my-awesome-container:/restic`.
 
 ## Known Issues
 
@@ -216,10 +313,15 @@ Volume backups with Velero can also be done using [Restic](https://velero.io/doc
 go mod tidy
 go build
 
+# Prepare docker
+docker buildx create --use
+
 # Build image
-docker buildx --file docker/Dockerfile \
+docker buildx build \
+              --file docker/Dockerfile \
               --platform "linux/amd64" \
-              --tag lirt/velero-plugin-for-openstack:v0.3.0 \
+              --tag lirt/velero-plugin-for-openstack:v0.5.0 \
+              --no-cache \
               --load \
               .
 
@@ -227,7 +329,8 @@ docker buildx --file docker/Dockerfile \
 docker buildx build \
               --file docker/Dockerfile \
               --platform linux/amd64,linux/arm/v6,linux/arm/v7,linux/arm64 \
-              --tag lirt/velero-plugin-for-openstack:v0.3.0 \
+              --tag lirt/velero-plugin-for-openstack:v0.5.0 \
+              --no-cache \
               --push \
               .
 
@@ -237,8 +340,9 @@ docker buildx build \
 for platform in linux/amd64 linux/arm/v6 linux/arm/v7 linux/arm64; do
     docker buildx build \
                   --file docker/Dockerfile \
-                  --tag lirt/velero-plugin-for-openstack:v0.3.0 \
+                  --tag lirt/velero-plugin-for-openstack:v0.5.0 \
                   --platform "${platform}" \
+                  --no-cache \
                   --load \
                   .
 done
