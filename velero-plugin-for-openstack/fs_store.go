@@ -1,0 +1,234 @@
+package main
+
+import (
+	"fmt"
+	"github.com/gophercloud/gophercloud"
+	"github.com/gophercloud/gophercloud/openstack"
+	"github.com/gophercloud/gophercloud/openstack/sharedfilesystems/v2/shares"
+	"github.com/gophercloud/gophercloud/openstack/sharedfilesystems/v2/snapshots"
+	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"math/rand"
+	"os"
+	"strconv"
+	"time"
+)
+
+type FSStore struct {
+	client   *gophercloud.ServiceClient
+	provider *gophercloud.ProviderClient
+	config   map[string]string
+	log      logrus.FieldLogger
+}
+
+// NewBlockStore instantiates a Manila Volume Snapshotter.
+func NewFSStore(log logrus.FieldLogger) *FSStore {
+	return &FSStore{log: log}
+}
+
+func (b *FSStore) Init(config map[string]string) error {
+	b.log.Infof("BlockStore.Init called", config)
+	b.config = config
+
+	// Authenticate to Openstack
+	err := Authenticate(&b.provider, "cinder", config, b.log)
+	if err != nil {
+		return fmt.Errorf("failed to authenticate against openstack: %v", err)
+	}
+
+	// If we haven't set client before or we use multiple clouds - get new client
+	if b.client == nil || config["cloud"] != "" {
+		region, ok := os.LookupEnv("OS_REGION_NAME")
+		if !ok {
+			if config["region"] != "" {
+				region = config["region"]
+			} else {
+				region = "RegionOne"
+			}
+		}
+		b.client, err = openstack.NewSharedFileSystemV2(b.provider, gophercloud.EndpointOpts{
+			Region: region,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to create manila storage client: %v", err)
+		}
+		b.log.Infof("Successfully created service client with endpoint %v using region %v", b.client.Endpoint, region)
+	}
+
+	return nil
+}
+
+// CreateVolumeFromSnapshot creates a new volume in the specified
+// availability zone, initialized from the provided snapshot and with the specified type.
+// IOPS is ignored as it is not used in Cinder.
+func (b *FSStore) CreateVolumeFromSnapshot(snapshotID, volumeType, volumeAZ string, iops *int64) (string, error) {
+	b.log.Infof("CreateVolumeFromSnapshot called", snapshotID, volumeType, volumeAZ)
+	var snapshotReadyTimeout int
+	snapshotReadyTimeout = 300
+
+	volumeName := fmt.Sprintf("%s.backup.%s", snapshotID, strconv.FormatUint(rand.Uint64(), 10))
+
+	// Make sure snapshot is in ready state
+	// Possible values for snapshot state:
+	//   https://github.com/openstack/cinder/blob/master/api-ref/source/v3/volumes-v3-snapshots.inc#volume-snapshots-snapshots
+	b.log.Infof("Waiting for snapshot to be in 'available' state", snapshotID, snapshotReadyTimeout)
+
+	sp, err := snapshots.Get(b.client, snapshotID).Extract()
+	if err != nil {
+		b.log.Error(err)
+	}
+	for sp.Status != "available" && snapshotReadyTimeout > 0 {
+		time.Sleep(5 * time.Second)
+		snapshotReadyTimeout -= 5
+		sp, err = snapshots.Get(b.client, snapshotID).Extract()
+		if err != nil {
+			b.log.Error(err)
+		}
+	}
+	if sp.Status == "available" {
+		b.log.Infof("Snapshot is in 'available' state", snapshotID)
+	} else {
+		b.log.Errorf("snapshot didn't get into 'available' state within the time limit", snapshotID, snapshotReadyTimeout)
+		return "", err
+	}
+
+	// Create Manila Volume from snapshot (backup)
+	b.log.Infof("Starting to create volume from snapshot")
+
+	createOpts := &shares.CreateOpts{
+		AvailabilityZone: volumeAZ,
+		Name:             volumeName,
+		SnapshotID:       sp.ID,
+		ShareProto:       sp.ShareProto,
+		Size:             sp.Size,
+	}
+	share, err := shares.Create(b.client, createOpts).Extract()
+
+	if err != nil {
+		b.log.Errorf("failed to create volume from snapshot", snapshotID)
+		return "", errors.WithStack(err)
+	}
+	b.log.Infof("Backup volume was created", volumeName, share.ID)
+
+	return share.ID, nil
+}
+
+func (b *FSStore) GetVolumeInfo(volumeID, volumeAZ string) (string, *int64, error) {
+	b.log.Infof("GetVolumeInfo called", volumeID, volumeAZ)
+
+	volume, err := shares.Get(b.client, volumeID).Extract()
+	if err != nil {
+		b.log.Errorf("failed to get volume %v from Cinder", volumeID)
+		return "", nil, fmt.Errorf("volume %v not found", volumeID)
+	}
+
+	return volume.VolumeType, nil, nil
+}
+
+// IsVolumeReady Check if the volume is in one of the ready states.
+func (b *FSStore) IsVolumeReady(volumeID, volumeAZ string) (ready bool, err error) {
+	b.log.Infof("IsVolumeReady called", volumeID, volumeAZ)
+
+	// Get volume object from Manila
+	manilaVolume, err := shares.Get(b.client, volumeID).Extract()
+	if err != nil {
+		b.log.Errorf("failed to get volume %v from Cinder", volumeID)
+		return false, err
+	}
+
+	// Ready states:
+	//   https://github.com/openstack/cinder/blob/master/api-ref/source/v3/volumes-v3-volumes.inc#volumes-volumes
+	if manilaVolume.Status == "available" || manilaVolume.Status == "in-use" {
+		return true, nil
+	}
+
+	// Volume is not in one of the "ready" states
+	return false, fmt.Errorf("volume %v is not in ready state, the status is %v", volumeID, manilaVolume.Status)
+}
+
+// CreateSnapshot creates a snapshot of the specified volume, and applies any provided
+// set of tags to the snapshot.
+func (b *FSStore) CreateSnapshot(volumeID, volumeAZ string, tags map[string]string) (string, error) {
+	b.log.Infof("CreateSnapshot called", volumeID, volumeAZ, tags)
+	snapshotName := fmt.Sprintf("%s.snap.%s", volumeID, strconv.FormatUint(rand.Uint64(), 10))
+
+	b.log.Infof("Trying to create snapshot", snapshotName)
+	opts := snapshots.CreateOpts{
+		Name:               snapshotName,
+		Description:        "Velero snapshot",
+		ShareID:            volumeID,
+		DisplayName:        snapshotName,
+		DisplayDescription: "Velero snapshot",
+	}
+
+	// Note: we will wait for snapshot to be in ready state in CreateVolumeForSnapshot()
+	createResult, err := snapshots.Create(b.client, opts).Extract()
+	if err != nil {
+		return "", errors.WithStack(err)
+	}
+	snapshotID := createResult.ID
+
+	b.log.Infof("Snapshot finished successfuly", snapshotName, snapshotID)
+	return snapshotID, nil
+}
+
+// DeleteSnapshot deletes the specified volume snapshot.
+func (b *FSStore) DeleteSnapshot(snapshotID string) error {
+	b.log.Infof("DeleteSnapshot called", snapshotID)
+
+	// Delete snapshot from Cinder
+	b.log.Infof("Deleting Snapshot with ID", snapshotID)
+	err := snapshots.Delete(b.client, snapshotID).ExtractErr()
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	return nil
+}
+
+// GetVolumeID returns the specific identifier for the PersistentVolume.
+func (b *FSStore) GetVolumeID(unstructuredPV runtime.Unstructured) (string, error) {
+	b.log.Infof("GetVolumeID called", unstructuredPV)
+
+	pv := new(v1.PersistentVolume)
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(unstructuredPV.UnstructuredContent(), pv); err != nil {
+		return "", errors.WithStack(err)
+	}
+
+	var volumeID string
+
+	if pv.Spec.CSI.Driver == "manila.csi.openstack.org" {
+		volumeID = pv.Spec.CSI.VolumeHandle
+	}
+
+	if volumeID == "" {
+		return "", errors.New("volumeID not found")
+	}
+
+	return volumeID, nil
+}
+
+// SetVolumeID sets the specific identifier for the PersistentVolume.
+func (b *FSStore) SetVolumeID(unstructuredPV runtime.Unstructured, volumeID string) (runtime.Unstructured, error) {
+	b.log.Infof("SetVolumeID called", unstructuredPV, volumeID)
+
+	pv := new(v1.PersistentVolume)
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(unstructuredPV.UnstructuredContent(), pv); err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	if pv.Spec.CSI.Driver == "manila.csi.openstack.org" {
+		pv.Spec.CSI.VolumeHandle = volumeID
+	} else {
+		return nil, errors.New("spec.csi for manila driver not found")
+	}
+
+	res, err := runtime.DefaultUnstructuredConverter.ToUnstructured(pv)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	return &unstructured.Unstructured{Object: res}, nil
+}
