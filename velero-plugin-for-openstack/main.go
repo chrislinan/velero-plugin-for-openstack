@@ -9,6 +9,7 @@ func main() {
 	veleroplugin.NewServer().
 		RegisterObjectStore("community.openstack.org/openstack", newSwiftObjectStore).
 		RegisterVolumeSnapshotter("community.openstack.org/openstack", newCinderBlockStore).
+		RegisterVolumeSnapshotter("community.openstack.org/openstack", newManilaFSStore).
 		Serve()
 }
 
@@ -18,4 +19,8 @@ func newSwiftObjectStore(logger logrus.FieldLogger) (interface{}, error) {
 
 func newCinderBlockStore(logger logrus.FieldLogger) (interface{}, error) {
 	return NewBlockStore(logger), nil
+}
+
+func newManilaFSStore(logger logrus.FieldLogger) (interface{}, error) {
+	return NewFSStore(logger), nil
 }
