@@ -9,7 +9,7 @@ func main() {
 	veleroplugin.NewServer().
 		RegisterObjectStore("community.openstack.org/openstack", newSwiftObjectStore).
 		RegisterVolumeSnapshotter("community.openstack.org/openstack", newCinderBlockStore).
-		RegisterVolumeSnapshotter("community.openstack.org/openstack", newManilaFSStore).
+		RegisterVolumeSnapshotter("community.openstack.org/openstack-manila", newManilaFSStore).
 		Serve()
 }
 
