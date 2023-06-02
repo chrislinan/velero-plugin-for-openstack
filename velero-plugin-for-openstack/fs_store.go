@@ -24,17 +24,17 @@ type FSStore struct {
 	log      logrus.FieldLogger
 }
 
-// NewBlockStore instantiates a Manila Volume Snapshotter.
+// NewFSStore instantiates a Manila Volume Snapshotter.
 func NewFSStore(log logrus.FieldLogger) *FSStore {
 	return &FSStore{log: log}
 }
 
 func (b *FSStore) Init(config map[string]string) error {
-	b.log.Infof("BlockStore.Init called", config)
+	b.log.Infof("FSStore.Init called", config)
 	b.config = config
 
 	// Authenticate to Openstack
-	err := Authenticate(&b.provider, "cinder", config, b.log)
+	err := Authenticate(&b.provider, "manila", config, b.log)
 	if err != nil {
 		return fmt.Errorf("failed to authenticate against openstack: %v", err)
 	}
@@ -63,7 +63,7 @@ func (b *FSStore) Init(config map[string]string) error {
 
 // CreateVolumeFromSnapshot creates a new volume in the specified
 // availability zone, initialized from the provided snapshot and with the specified type.
-// IOPS is ignored as it is not used in Cinder.
+// IOPS is ignored as it is not used in Manila.
 func (b *FSStore) CreateVolumeFromSnapshot(snapshotID, volumeType, volumeAZ string, iops *int64) (string, error) {
 	b.log.Infof("CreateVolumeFromSnapshot called", snapshotID, volumeType, volumeAZ)
 	var snapshotReadyTimeout int
@@ -73,7 +73,7 @@ func (b *FSStore) CreateVolumeFromSnapshot(snapshotID, volumeType, volumeAZ stri
 
 	// Make sure snapshot is in ready state
 	// Possible values for snapshot state:
-	//   https://github.com/openstack/cinder/blob/master/api-ref/source/v3/volumes-v3-snapshots.inc#volume-snapshots-snapshots
+	//   https://github.com/openstack/manila/blob/master/api-ref/source/snapshots.inc
 	b.log.Infof("Waiting for snapshot to be in 'available' state", snapshotID, snapshotReadyTimeout)
 
 	sp, err := snapshots.Get(b.client, snapshotID).Extract()
@@ -121,8 +121,8 @@ func (b *FSStore) GetVolumeInfo(volumeID, volumeAZ string) (string, *int64, erro
 
 	volume, err := shares.Get(b.client, volumeID).Extract()
 	if err != nil {
-		b.log.Errorf("failed to get volume %v from Cinder", volumeID)
-		return "", nil, fmt.Errorf("volume %v not found", volumeID)
+		b.log.Errorf("failed to get volume %v from Manila: %v", volumeID , err)
+		return "", nil, fmt.Errorf("failed to get volume %v", volumeID)
 	}
 
 	return volume.VolumeType, nil, nil
@@ -135,13 +135,13 @@ func (b *FSStore) IsVolumeReady(volumeID, volumeAZ string) (ready bool, err erro
 	// Get volume object from Manila
 	manilaVolume, err := shares.Get(b.client, volumeID).Extract()
 	if err != nil {
-		b.log.Errorf("failed to get volume %v from Cinder", volumeID)
+		b.log.Errorf("failed to get volume %v from Manila", volumeID)
 		return false, err
 	}
 
 	// Ready states:
-	//   https://github.com/openstack/cinder/blob/master/api-ref/source/v3/volumes-v3-volumes.inc#volumes-volumes
-	if manilaVolume.Status == "available" || manilaVolume.Status == "in-use" {
+	//   https://github.com/openstack/manila/blob/master/api-ref/source/shares.inc
+	if manilaVolume.Status == "available" {
 		return true, nil
 	}
 
@@ -179,7 +179,7 @@ func (b *FSStore) CreateSnapshot(volumeID, volumeAZ string, tags map[string]stri
 func (b *FSStore) DeleteSnapshot(snapshotID string) error {
 	b.log.Infof("DeleteSnapshot called", snapshotID)
 
-	// Delete snapshot from Cinder
+	// Delete snapshot from Manila
 	b.log.Infof("Deleting Snapshot with ID", snapshotID)
 	err := snapshots.Delete(b.client, snapshotID).ExtractErr()
 	if err != nil {
@@ -199,7 +199,7 @@ func (b *FSStore) GetVolumeID(unstructuredPV runtime.Unstructured) (string, erro
 
 	var volumeID string
 
-	if pv.Spec.CSI.Driver == "manila.csi.openstack.org" {
+	if pv.Spec.CSI.Driver == "nfs.manila.csi.openstack.org" {
 		volumeID = pv.Spec.CSI.VolumeHandle
 	}
 
@@ -219,7 +219,7 @@ func (b *FSStore) SetVolumeID(unstructuredPV runtime.Unstructured, volumeID stri
 		return nil, errors.WithStack(err)
 	}
 
-	if pv.Spec.CSI.Driver == "manila.csi.openstack.org" {
+	if pv.Spec.CSI.Driver == "nfs.manila.csi.openstack.org" {
 		pv.Spec.CSI.VolumeHandle = volumeID
 	} else {
 		return nil, errors.New("spec.csi for manila driver not found")
