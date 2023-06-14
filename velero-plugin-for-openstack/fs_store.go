@@ -58,7 +58,7 @@ func (b *FSStore) Init(config map[string]string) error {
 		}
 
 		// I have to add this,
-        // otherwise GrantAccess will report 404
+		// otherwise GrantAccess will report 404
 		b.client.Microversion = "2.57"
 
 		b.log.Infof("Successfully created service client with endpoint %v using region %v", b.client.Endpoint, region)
@@ -280,18 +280,18 @@ func (b *FSStore) SetVolumeID(unstructuredPV runtime.Unstructured, volumeID stri
 		}
 
 		rules, err := shareaccessrules.List(b.client, originShare.ID).Extract()
-	    if err != nil {
-	    	b.log.Error(err)
-	        return nil, errors.WithStack(err)
-	    }
+		if err != nil {
+			b.log.Error(err)
+			return nil, errors.WithStack(err)
+		}
 
-	    if len(rules) < 1 {
-	    	b.log.Error("No access rules found in the origin share %v", originShare.ID)
-	        return nil, errors.WithStack(err)
-	    }
+		if len(rules) < 1 {
+			b.log.Error("No access rules found in the origin share %v", originShare.ID)
+			return nil, errors.WithStack(err)
+		}
 
-	    // Grant the first access as share access
-	    grantAccessOpts := &shares.GrantAccessOpts{
+		// Grant the first access as share access
+		grantAccessOpts := &shares.GrantAccessOpts{
 			AccessType:  rules[0].AccessType,
 			AccessTo:    rules[0].AccessTo,
 			AccessLevel: rules[0].AccessLevel,
