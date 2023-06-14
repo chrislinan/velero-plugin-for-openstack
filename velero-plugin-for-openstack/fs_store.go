@@ -5,6 +5,7 @@ import (
 	"github.com/gophercloud/gophercloud"
 	"github.com/gophercloud/gophercloud/openstack"
 	"github.com/gophercloud/gophercloud/openstack/sharedfilesystems/v2/shares"
+	"github.com/gophercloud/gophercloud/openstack/sharedfilesystems/v2/shareaccessrules"
 	"github.com/gophercloud/gophercloud/openstack/sharedfilesystems/v2/snapshots"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -55,6 +56,11 @@ func (b *FSStore) Init(config map[string]string) error {
 		if err != nil {
 			return fmt.Errorf("failed to create manila storage client: %v", err)
 		}
+
+		// I have to add this,
+        // otherwise GrantAccess will report 404
+		b.client.Microversion = "2.57"
+
 		b.log.Infof("Successfully created service client with endpoint %v using region %v", b.client.Endpoint, region)
 	}
 
@@ -111,7 +117,29 @@ func (b *FSStore) CreateVolumeFromSnapshot(snapshotID, volumeType, volumeAZ stri
 		b.log.Errorf("failed to create volume from snapshot", snapshotID)
 		return "", errors.WithStack(err)
 	}
-	b.log.Infof("Backup volume was created", volumeName, share.ID)
+
+	// Wait the share to be ready
+	ready, err := b.IsVolumeReady(share.ID, volumeAZ)
+	shareReadyTimeout := 300
+	for shareReadyTimeout > 0 {
+		time.Sleep(5 * time.Second)
+		shareReadyTimeout -= 5
+		ready, err = b.IsVolumeReady(share.ID, volumeAZ)
+		if err != nil {
+			b.log.Error(err)
+		}
+
+		if ready {
+			break
+		}
+	}
+
+	if ready {
+		b.log.Infof("Backup volume was created", volumeName, share.ID)
+	} else {
+		b.log.Errorf("share didn't get into 'available' state within the time limit", share.ID, shareReadyTimeout)
+		return "", err
+	}
 
 	return share.ID, nil
 }
@@ -149,27 +177,34 @@ func (b *FSStore) IsVolumeReady(volumeID, volumeAZ string) (ready bool, err erro
 	return false, fmt.Errorf("volume %v is not in ready state, the status is %v", volumeID, manilaVolume.Status)
 }
 
-// CreateSnapshot creates a snapshot of the specified volume, and applies any provided
+// CreateSnapshot creates a snapshot of the specified volume, and does NOT apply any provided
 // set of tags to the snapshot.
 func (b *FSStore) CreateSnapshot(volumeID, volumeAZ string, tags map[string]string) (string, error) {
 	b.log.Infof("CreateSnapshot called", volumeID, volumeAZ, tags)
 	snapshotName := fmt.Sprintf("%s.snap.%s", volumeID, strconv.FormatUint(rand.Uint64(), 10))
 
 	b.log.Infof("Trying to create snapshot", snapshotName)
+
+	// NOTE: Because the `Description` field can only support up to 255 bytes,
+	//       it seems to be too small to have `tags` stored in the snapshot
+	description := "velero backup"
 	opts := snapshots.CreateOpts{
 		Name:               snapshotName,
-		Description:        "Velero snapshot",
+		Description:        description,
 		ShareID:            volumeID,
 		DisplayName:        snapshotName,
-		DisplayDescription: "Velero snapshot",
+		DisplayDescription: description,
 	}
 
-	// Note: we will wait for snapshot to be in ready state in CreateVolumeForSnapshot()
 	createResult, err := snapshots.Create(b.client, opts).Extract()
 	if err != nil {
+		b.log.Error(err)
 		return "", errors.WithStack(err)
 	}
 	snapshotID := createResult.ID
+
+	// TODO: Wait the snapshot to be ready HERE instead of in `CreateVolumeFromSnapshot`!
+	//       Because otherwise velero may restore extra data if the user does not check snapshot status carefully
 
 	b.log.Infof("Snapshot finished successfuly", snapshotName, snapshotID)
 	return snapshotID, nil
@@ -221,6 +256,54 @@ func (b *FSStore) SetVolumeID(unstructuredPV runtime.Unstructured, volumeID stri
 
 	if pv.Spec.CSI.Driver == "nfs.manila.csi.openstack.org" {
 		pv.Spec.CSI.VolumeHandle = volumeID
+		pv.Spec.CSI.VolumeAttributes["shareID"] = volumeID
+
+		// To determine the share access to be created, we need to find along this path
+		// new share -> snapshot -> old share -> old share's share access
+
+		share, err := shares.Get(b.client, volumeID).Extract()
+		if err != nil {
+			b.log.Error(err)
+			return nil, errors.WithStack(err)
+		}
+
+		snapshot, err := snapshots.Get(b.client, share.SnapshotID).Extract()
+		if err != nil {
+			b.log.Error(err)
+			return nil, errors.WithStack(err)
+		}
+
+		originShare, err := shares.Get(b.client, snapshot.ShareID).Extract()
+		if err != nil {
+			b.log.Error(err)
+			return nil, errors.WithStack(err)
+		}
+
+		rules, err := shareaccessrules.List(b.client, originShare.ID).Extract()
+	    if err != nil {
+	    	b.log.Error(err)
+	        return nil, errors.WithStack(err)
+	    }
+
+	    if len(rules) < 1 {
+	    	b.log.Error("No access rules found in the origin share %v", originShare.ID)
+	        return nil, errors.WithStack(err)
+	    }
+
+	    // Grant the first access as share access
+	    grantAccessOpts := &shares.GrantAccessOpts{
+			AccessType:  rules[0].AccessType,
+			AccessTo:    rules[0].AccessTo,
+			AccessLevel: rules[0].AccessLevel,
+		}
+		accessRignt, err := shares.GrantAccess(b.client, volumeID, grantAccessOpts).Extract()
+		if err != nil {
+			b.log.Error(err)
+			return nil, errors.WithStack(err)
+		}
+
+		pv.Spec.CSI.VolumeAttributes["shareAccessID"] = accessRignt.ID
+
 	} else {
 		return nil, errors.New("spec.csi for manila driver not found")
 	}
