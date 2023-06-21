@@ -72,32 +72,19 @@ func (b *FSStore) Init(config map[string]string) error {
 // IOPS is ignored as it is not used in Manila.
 func (b *FSStore) CreateVolumeFromSnapshot(snapshotID, volumeType, volumeAZ string, iops *int64) (string, error) {
 	b.log.Infof("CreateVolumeFromSnapshot called", snapshotID, volumeType, volumeAZ)
-	var snapshotReadyTimeout int
-	snapshotReadyTimeout = 300
 
 	volumeName := fmt.Sprintf("%s.backup.%s", snapshotID, strconv.FormatUint(rand.Uint64(), 10))
-
-	// Make sure snapshot is in ready state
-	// Possible values for snapshot state:
-	//   https://github.com/openstack/manila/blob/master/api-ref/source/snapshots.inc
-	b.log.Infof("Waiting for snapshot to be in 'available' state", snapshotID, snapshotReadyTimeout)
 
 	sp, err := snapshots.Get(b.client, snapshotID).Extract()
 	if err != nil {
 		b.log.Error(err)
 	}
-	for sp.Status != "available" && snapshotReadyTimeout > 0 {
-		time.Sleep(5 * time.Second)
-		snapshotReadyTimeout -= 5
-		sp, err = snapshots.Get(b.client, snapshotID).Extract()
-		if err != nil {
-			b.log.Error(err)
-		}
-	}
+
+	// Snapshot should be already in ready state because we wait for it when creating
 	if sp.Status == "available" {
 		b.log.Infof("Snapshot is in 'available' state", snapshotID)
 	} else {
-		b.log.Errorf("snapshot didn't get into 'available' state within the time limit", snapshotID, snapshotReadyTimeout)
+		b.log.Errorf("Snapshot is not in 'available' state", snapshotID)
 		return "", err
 	}
 
@@ -203,8 +190,31 @@ func (b *FSStore) CreateSnapshot(volumeID, volumeAZ string, tags map[string]stri
 	}
 	snapshotID := createResult.ID
 
-	// TODO: Wait the snapshot to be ready HERE instead of in `CreateVolumeFromSnapshot`!
-	//       Because otherwise velero may restore extra data if the user does not check snapshot status carefully
+	var snapshotReadyTimeout int
+	snapshotReadyTimeout = 300
+	// Make sure snapshot is in ready state
+	// Possible values for snapshot state:
+	//   https://github.com/openstack/manila/blob/master/api-ref/source/snapshots.inc
+	b.log.Infof("Waiting for snapshot to be in 'available' state", snapshotID, snapshotReadyTimeout)
+
+	sp, err := snapshots.Get(b.client, snapshotID).Extract()
+	if err != nil {
+		b.log.Error(err)
+	}
+	for sp.Status != "available" && snapshotReadyTimeout > 0 {
+		time.Sleep(5 * time.Second)
+		snapshotReadyTimeout -= 5
+		sp, err = snapshots.Get(b.client, snapshotID).Extract()
+		if err != nil {
+			b.log.Error(err)
+		}
+	}
+	if sp.Status == "available" {
+		b.log.Infof("Snapshot is in 'available' state", snapshotID)
+	} else {
+		b.log.Errorf("snapshot didn't get into 'available' state within the time limit", snapshotID, snapshotReadyTimeout)
+		return "", err
+	}
 
 	b.log.Infof("Snapshot finished successfuly", snapshotName, snapshotID)
 	return snapshotID, nil
