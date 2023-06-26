@@ -1,3 +1,23 @@
+**NOTE**: This is a modified version of original Velero Plugin for OpenStack!
+
+It can support manila snapshot by changing configuration of `volumesnapshotlocations.velero.io` to:
+
+```yaml
+spec:
+  provider: community.openstack.org/openstack-manila
+  ...
+```
+
+The credential should have manila admin permission.
+
+During backup, the plugin will search for the original volume, and set the first share access rule to the new volume.
+
+The snapshot on OpenStack will be in "Available" status before velero backup is completed, so it can be used right after velero reporting "Completed".
+
+Currently, you can only create one `volumesnapshotlocations.velero.io`. Having 2 `volumesnapshotlocations.velero.io` with `community.openstack.org/openstack-manila` and `community.openstack.org/openstack` providers may cause "PartiallyFailed" during backup.
+
+Below is original README.md:
+
 # Velero Plugin for OpenStack
 
 OpenStack Cinder and Swift plugin for [velero](https://github.com/vmware-tanzu/velero/) backups.
