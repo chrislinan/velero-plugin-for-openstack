@@ -1,20 +1,6 @@
 **NOTE**: This is a modified version of original Velero Plugin for OpenStack!
 
-It can support manila snapshot by changing configuration of `volumesnapshotlocations.velero.io` to:
-
-```yaml
-spec:
-  provider: community.openstack.org/openstack-manila
-  ...
-```
-
-The credential should have manila admin permission.
-
-During backup, the plugin will search for the original volume, and set the first share access rule to the new volume.
-
-The snapshot on OpenStack will be in "Available" status before velero backup is completed, so it can be used right after velero reporting "Completed".
-
-Currently, you can only create one `volumesnapshotlocations.velero.io`. Having 2 `volumesnapshotlocations.velero.io` with `community.openstack.org/openstack-manila` and `community.openstack.org/openstack` providers may cause "PartiallyFailed" during backup.
+It changes the file structure of the original velero plugin to match other official plugins. So the building process is unified across all plugins we use.
 
 Below is original README.md:
 
@@ -46,11 +32,8 @@ Below is a matrix of plugin versions and Velero versions for which the compatibi
 
 | Plugin Version | Velero Version |
 | :------------- | :------------- |
-| v0.5.x         | v1.4.x, v1.5.x, v1.6.x, v1.7.x, v1.8.x, 1.9.x, 1.10.x |
+| v0.5.x         | v1.4.x, v1.5.x, v1.6.x, v1.7.x, v1.8.x, 1.9.x, 1.10.x 1.11.x |
 | v0.4.x         | v1.4.x, v1.5.x, v1.6.x, v1.7.x, v1.8.x, 1.9.x |
-| v0.3.x         | v1.4.x, v1.5.x, v1.6.x, v1.7.x, v1.8.x, 1.9.x |
-| v0.2.x         | v1.4.x, v1.5.x |
-| v0.1.x         | v1.4.x, v1.5.x |
 
 ## OpenStack Authentication Configuration
 
@@ -236,15 +219,15 @@ Initialize velero plugin:
 # Initialize velero from scratch:
 velero install \
        --provider "community.openstack.org/openstack" \
-       --plugins lirt/velero-plugin-for-openstack:v0.5.0 \
+       --plugins lirt/velero-plugin-for-openstack:v0.5.2 \
        --bucket <SWIFT_CONTAINER_NAME> \
        --no-secret
 
 # Or add plugin to existing velero:
-velero plugin add lirt/velero-plugin-for-openstack:v0.5.0
+velero plugin add lirt/velero-plugin-for-openstack:v0.5.2
 ```
 
-Note: If you want to use plugin built for `arm` or `arm64` architecture, you can use tag such as this `lirt/velero-plugin-for-openstack:v0.5.0-arm64`.
+Note: If you want to use plugin built for `arm` or `arm64` architecture, you can use tag such as this `lirt/velero-plugin-for-openstack:v0.5.2-arm64`.
 
 Change configuration of `backupstoragelocations.velero.io`:
 
@@ -266,7 +249,7 @@ Change configuration of `volumesnapshotlocations.velero.io`:
 
 ```yaml
 spec:
-  provider: community.openstack.org/openstack
+  provider: community.openstack.org/openstack-cinder
   # optional config
   # config:
   #   cloud: cloud1
@@ -286,20 +269,58 @@ To use it, first create `values.yaml` file which will later be used in helm inst
 credentials:
   extraSecretRef: "velero-credentials"
 configuration:
-  provider: community.openstack.org/openstack
   backupStorageLocation:
+  - name: swift
+    provider: community.openstack.org/openstack
     bucket: my-swift-container
     # caCert: <CERT_CONTENTS_IN_BASE64>
-  # # Optional config
-  # config:
-  #   cloud: cloud1
-  #   region: fra
-  #   # If you want to enable restic you need to set resticRepoPrefix to this value:
-  #   #   resticRepoPrefix: swift:<CONTAINER_NAME>:/<PATH>
-  #   resticRepoPrefix: swift:my-awesome-container:/restic # Example
+    # # Optional config
+    # config:
+    #   cloud: cloud1
+    #   region: fra
+    #   # If you want to enable restic you need to set resticRepoPrefix to this value:
+    #   #   resticRepoPrefix: swift:<CONTAINER_NAME>:/<PATH>
+    #   resticRepoPrefix: swift:my-awesome-container:/restic # Example
+  volumeSnapshotLocation:
+  # for Cinder block storage
+  - name: cinder
+    provider: community.openstack.org/openstack-cinder
+    config:
+      # optional snapshot method:
+      # * "snapshot" is a default cinder snapshot method
+      # * "clone" is for a full volume clone instead of a snapshot allowing the
+      # source volume to be deleted
+      # * "backup" is for a full volume backup uploaded to a Cinder backup
+      # allowing the source volume to be deleted (EXPERIMENTAL)
+      # * "image" is for a full volume backup uploaded to a Glance image
+      # allowing the source volume to be deleted (EXPERIMENTAL)
+      method: clone
+      # optional resource readiness timeouts in Golang time format: https://pkg.go.dev/time#ParseDuration
+      # (default: 5m)
+      volumeTimeout: 5m
+      snapshotTimeout: 5m
+      cloneTimeout: 5m
+      backupTimeout: 5m
+      imageTimeout: 5m
+  # for Manila shared filesystem storage
+  - name: manila
+    provider: community.openstack.org/openstack-manila
+    config:
+      # optional snapshot method:
+      # * "snapshot" is a default manila snapshot method
+      # * "clone" is for a full share clone instead of a snapshot allowing the
+      # source share to be deleted
+      method: clone
+      # optional Manila CSI driver name (default: nfs.manila.csi.openstack.org)
+      driver: ceph.manila.csi.openstack.org
+      # optional resource readiness timeouts in Golang time format: https://pkg.go.dev/time#ParseDuration
+      # (default: 5m)
+      shareTimeout: 5m
+      snapshotTimeout: 5m
+      cloneTimeout: 5m
 initContainers:
 - name: velero-plugin-openstack
-  image: lirt/velero-plugin-for-openstack:v0.5.0
+  image: lirt/velero-plugin-for-openstack:v0.5.2
   imagePullPolicy: IfNotPresent
   volumeMounts:
     - mountPath: /target
@@ -323,7 +344,7 @@ helm upgrade \
      --install \
      --namespace velero \
      --values values.yaml \
-     --version 2.32.1
+     --version 4.0.1
 ```
 
 ## Volume Backups
@@ -360,7 +381,9 @@ go build
 docker buildx build \
               --file docker/Dockerfile \
               --platform linux/amd64,linux/arm/v6,linux/arm/v7,linux/arm64 \
-              --tag lirt/velero-plugin-for-openstack:v0.5.0 \
+              --tag lirt/velero-plugin-for-openstack:v0.5.2 \
+              --build-arg VERSION=v0.5.2 \
+              --build-arg GIT_SHA=somesha \
               --no-cache \
               --push \
               .
