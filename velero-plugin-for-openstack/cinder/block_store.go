@@ -85,6 +85,8 @@ var (
 
 // BlockStore is a plugin for containing state for the Cinder Block Storage
 type BlockStore struct {
+	once               sync.Once
+	initErr            error
 	client             *gophercloud.ServiceClient
 	imgClient          *gophercloud.ServiceClient
 	provider           *gophercloud.ProviderClient
@@ -111,9 +113,23 @@ var _ velerovolumesnapshotter.VolumeSnapshotter = (*BlockStore)(nil)
 // configuration key-value pairs. It returns an error if the VolumeSnapshotter
 // cannot be initialized from the provided config.
 func (b *BlockStore) Init(config map[string]string) error {
+	b.once.Do(func() {
+		b.initErr = b.doInit(config)
+	})
+
+	if b.initErr != nil {
+		b.log.WithError(b.initErr).Warn("BlockStore initialization failed on first attempt, but ignoring for subsequent calls")
+		return nil
+	}
+
+	return nil
+}
+
+func (b *BlockStore) doInit(config map[string]string) error {
 	b.log.WithFields(logrus.Fields{
 		"config": config,
-	}).Info("BlockStore.Init called")
+	}).Info("BlockStore.Init called (sync.Once protected)")
+
 	b.config = config
 
 	// parse the snapshot method
@@ -144,6 +160,7 @@ func (b *BlockStore) Init(config map[string]string) error {
 	if err != nil {
 		return fmt.Errorf("cannot parse time from imageTimeout config variable: %w", err)
 	}
+
 	// parse options
 	b.ensureDeleted, err = strconv.ParseBool(utils.GetConf(b.config, "ensureDeleted", "false"))
 	if err != nil {
