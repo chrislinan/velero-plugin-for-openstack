@@ -66,6 +66,8 @@ var (
 
 // FSStore is a plugin for containing state for the Manila Shared Filesystem
 type FSStore struct {
+	once               sync.Once //Use sync.once to protect Init()
+	initErr            error
 	client             *gophercloud.ServiceClient
 	provider           *gophercloud.ProviderClient
 	config             map[string]string
@@ -91,9 +93,21 @@ var _ velerovolumesnapshotter.VolumeSnapshotter = (*FSStore)(nil)
 // configuration key-value pairs. It returns an error if the VolumeSnapshotter
 // cannot be initialized from the provided config.
 func (b *FSStore) Init(config map[string]string) error {
+	b.once.Do(func() {
+		b.initErr = b.doInit(config)
+	})
+	if b.initErr != nil {
+		b.log.WithError(b.initErr).Warn("FSStore initialization failed on first attempt, but ignoring for subsequent calls")
+		return nil
+	}
+	return nil
+}
+
+func (b *FSStore) doInit(config map[string]string) error {
 	b.log.WithFields(logrus.Fields{
 		"config": config,
-	}).Info("FSStore.Init called")
+	}).Info("FSStore.Init called (sync.Once protected)")
+
 	b.config = config
 
 	// set default Manila CSI driver name
@@ -123,6 +137,7 @@ func (b *FSStore) Init(config map[string]string) error {
 	if err != nil {
 		return fmt.Errorf("cannot parse time from replicaTimeout config variable: %w", err)
 	}
+
 	// parse options
 	b.ensureDeleted, err = strconv.ParseBool(utils.GetConf(b.config, "ensureDeleted", "false"))
 	if err != nil {
